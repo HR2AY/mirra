@@ -8,7 +8,7 @@
 
 # Mirra
 
-Mirra is a native macOS floating camera window for live virtual try-on. The app appears as **Try On** in Finder. When the service returns a usable frame, the large preview shows the try-on result and the smaller preview below shows the live camera.
+Mirra is a native macOS floating camera window for live virtual try-on. The app appears as **Try On** in Finder. When the service returns a usable frame, the large portrait preview on the left shows the try-on result and the smaller portrait preview on the right shows the live camera.
 
 ## Build
 
@@ -27,4 +27,4 @@ open "$app"
 
 ## Use
 
-Allow camera access when macOS asks. Select **Upload** and choose a JPEG, PNG, or WebP garment image. Confirming the selection starts a paid 30-second Decart session and shares the image and live video with the service. If prompted, sign in with your [try-on service account](https://try-on.apps.viceme.ai/). The app saves successful sign-ins in the macOS Keychain.
+Allow camera access when macOS asks. Select **Upload** and choose a JPEG, PNG, or WebP garment image. Confirming the selection starts a paid 30-second Decart session and shares the image and live video with the service. If prompted, enter the access password on the embedded [try-on page](https://try-on.apps.viceme.ai/). The app reuses the website’s sign-in cookie until it expires.

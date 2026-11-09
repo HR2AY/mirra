@@ -8,11 +8,10 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
     var releaseCamera: (() async -> Void)?
     var resumeCamera: (() -> Void)?
     private var ownsCamera = false
-    private var credentialToSave: URLCredential?
-    private var triedSavedLogin = false
+    @Published private(set) var needsLogin = false
+    private var pageTask: Task<Void, Never>?
     private var sawBlackVideo = false
     private var lastServiceStatus: String?
-    private var loginSaveFailed = false
     @Published private(set) var status: String?
     private let origin = URL(string: "https://try-on.apps.viceme.ai/")!
     private var pending: (data: Data, name: String, type: String)?
@@ -22,6 +21,7 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
 
     lazy var view: WKWebView = {
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(self, name: bridge)
         configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "tryOnCameraHandoff")
@@ -52,10 +52,9 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
         self.window = window
         hasVideo = false
         hasLocalVideo = false
-        triedSavedLogin = false
+        needsLogin = false
         sawBlackVideo = false
         lastServiceStatus = nil
-        loginSaveFailed = false
         isBusy = true
         status = "Connecting…"
         view.load(URLRequest(url: origin, timeoutInterval: 20))
@@ -79,27 +78,51 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard let image = pending, webView.url?.host == origin.host else {
-            if isBusy {
-                finish(hasVideo ? "Session ended." : noVideoMessage)
-            }
+        guard isBusy, webView.url?.host == origin.host else { return }
+        guard pending != nil else {
+            finish(hasVideo ? "Session ended." : noVideoMessage)
             return
         }
-        if let credential = credentialToSave {
-            loginSaveFailed = !TryOnLogin.save(credential)
-            credentialToSave = nil
-        }
-        pending = nil
-        Task {
-            do {
-                _ = try await webView.callAsyncJavaScript(
-                    Self.startScript,
-                    arguments: ["base64": image.data.base64EncodedString(), "name": image.name, "type": image.type],
-                    in: nil, contentWorld: .page
-                )
-            } catch {
-                if isBusy { finish("Could not start try-on.") }
+        pageTask?.cancel()
+        pageTask = Task { await waitForTryOnPage() }
+    }
+
+    func cancelLogin() {
+        guard needsLogin else { return }
+        finish("Sign-in canceled.")
+        view.stopLoading()
+    }
+
+    private func waitForTryOnPage() async {
+        var deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        do {
+            while !Task.isCancelled, let image = pending {
+                let state = try await view.evaluateJavaScript(Self.pageStateScript) as? String
+                guard !Task.isCancelled else { return }
+                if state == "try-on" {
+                    needsLogin = false
+                    status = "Connecting…"
+                    _ = try await view.callAsyncJavaScript(
+                        Self.startScript,
+                        arguments: [
+                            "base64": image.data.base64EncodedString(), "name": image.name, "type": image.type,
+                            "cameraScale": PreviewLayout.cameraScale, "previewGap": PreviewLayout.inset
+                        ],
+                        in: nil, contentWorld: .page
+                    )
+                    return
+                }
+                if state == "login" {
+                    if !needsLogin { needsLogin = true }
+                    deadline = .now.advanced(by: .seconds(15))
+                } else if .now >= deadline {
+                    finish("Try-on page did not load.")
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(300))
             }
+        } catch {
+            if !Task.isCancelled, isBusy, !view.isLoading { finish("Could not open the try-on page.") }
         }
     }
 
@@ -110,11 +133,13 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
 
     private func finish(_ message: String) {
         pending = nil
-        credentialToSave = nil
+        pageTask?.cancel()
+        pageTask = nil
+        needsLogin = false
         isBusy = false
         hasVideo = false
         hasLocalVideo = false
-        status = loginSaveFailed ? message + " Keychain could not save the login." : message
+        status = message
         if ownsCamera {
             ownsCamera = false
             view.setCameraCaptureState(.none) { [weak self] in
@@ -133,54 +158,6 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
         }
     }
 
-    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
-                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        let space = challenge.protectionSpace
-        guard space.authenticationMethod == NSURLAuthenticationMethodHTTPBasic,
-              space.host == origin.host, space.protocol == "https" else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        guard isBusy, challenge.previousFailureCount < 2, let window else {
-            finish("Try-on sign-in failed.")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-        if challenge.previousFailureCount > 0 {
-            credentialToSave = nil
-            if triedSavedLogin { TryOnLogin.clear() }
-        } else if !triedSavedLogin, let credential = TryOnLogin.read() {
-            triedSavedLogin = true
-            completionHandler(.useCredential, credential)
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "Sign in to Try On"
-        alert.informativeText = space.host
-        alert.addButton(withTitle: "Sign In")
-        alert.addButton(withTitle: "Cancel")
-        let username = NSTextField(frame: NSRect(x: 0, y: 32, width: 240, height: 24))
-        let password = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        username.placeholderString = "Username"
-        password.placeholderString = "Password"
-        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 56))
-        fields.addSubview(username)
-        fields.addSubview(password)
-        alert.accessoryView = fields
-        alert.window.initialFirstResponder = username
-        alert.beginSheetModal(for: window) { response in
-            if response == .alertFirstButtonReturn {
-                let credential = URLCredential(user: username.stringValue,
-                    password: password.stringValue, persistence: .forSession)
-                self.credentialToSave = credential
-                completionHandler(.useCredential, credential)
-            } else {
-                self.finish("Sign-in canceled.")
-                completionHandler(.cancelAuthenticationChallenge, nil)
-            }
-        }
-    }
-
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor source: WKSecurityOrigin,
                  initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
@@ -194,11 +171,14 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage,
                                replyHandler: @escaping (Any?, String?) -> Void) {
-        guard isBusy, message.frameInfo.isMainFrame,
+        guard isBusy, pending != nil, message.frameInfo.isMainFrame,
               message.frameInfo.securityOrigin.host == origin.host else {
             replyHandler(nil, "Camera handoff is unavailable.")
             return
         }
+        // Login can replace the page while preflight is still running. Keep
+        // the selected image available until the actual session is starting.
+        pending = nil
         ownsCamera = true
         Task {
             await releaseCamera?()
@@ -231,6 +211,11 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
         }
     }
 
+    private static let pageStateScript = """
+    document.querySelector('form input[type=password][name=password]') ? 'login' :
+    document.querySelector('input[type=file][accept*="image/webp"]:not([capture])') ? 'try-on' : 'loading'
+    """
+
     private static let startScript = """
     const tell = message => window.webkit.messageHandlers.tryOnNative.postMessage(message);
     const until = async (get, timeout = 8000) => {
@@ -244,12 +229,11 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
     };
     const controls = () => {
         const buttons = [...document.querySelectorAll('button')];
-        const findButton = pattern => buttons.find(button => pattern.test(button.textContent.trim()));
+        const findButton = pattern => buttons.find(button =>
+            pattern.test((button.getAttribute('aria-label') || button.textContent).trim()));
         return {
-            input: document.querySelector('input#garment[type=file]'),
-            consent: document.querySelector('input[type=checkbox]'),
+            input: document.querySelector('input[type=file][accept*="image/webp"]:not([capture])'),
             start: findButton(/^(?:Start 30[-– ]second try[- ]on|开始\\s*30\\s*秒试穿)$/i),
-            stop: findButton(/^(?:Stop now|立即停止)$/i),
             local: document.querySelector('video[aria-label="Local camera"], video[aria-label="本机摄像头"]'),
             video: document.querySelector('video[aria-label="Decart output"], video[aria-label="Decart 输出"]')
         };
@@ -263,14 +247,19 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
         tell('Try-on page did not load: ' + missing.join(', ') + '.');
         return;
     }
-    const {input, consent, start, stop, local, video} = ready;
+    const {input, local, video} = ready;
+    const stopButton = () => [...document.querySelectorAll('button')].find(button =>
+        /^(?:Stop(?:\\s|$)|停止|结束)/i.test((button.getAttribute('aria-label') || button.textContent).trim()));
     const bytes = Uint8Array.from(atob(base64), character => character.charCodeAt(0));
     const transfer = new DataTransfer();
     transfer.items.add(new File([bytes], name, {type}));
     input.files = transfer.files;
     input.dispatchEvent(new Event('change', {bubbles: true}));
-    if (!consent.checked) consent.click();
-    if (!await until(() => !start.disabled)) {
+    const start = await until(() => {
+        const button = controls().start;
+        return button && !button.disabled ? button : null;
+    });
+    if (!start) {
         tell('Try-on could not start. Check the image and service status.');
         return;
     }
@@ -286,9 +275,11 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
             width:100%;height:100%;inset:0;border-radius:15px;visibility:hidden}
         #native-stage .visible {visibility:visible}
         #native-stage:not(.result) .local {transform:scaleX(-1)}
-        #native-stage.result .output {height:calc((100% - 12px) / 1.42)}
-        #native-stage.result .local {width:42%;height:calc((100% - 12px) * .42 / 1.42);
-            inset:auto 29% 0}
+        #native-stage.result {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,${cameraScale}fr);
+            grid-template-rows:minmax(0,1fr);column-gap:${previewGap}px;align-items:start}
+        #native-stage.result video {position:static}
+        #native-stage.result .output {grid-column:1;grid-row:1}
+        #native-stage.result .local {grid-column:2;grid-row:1;height:calc(100% * ${cameraScale})}
     `;
     document.head.append(style);
     const stage = document.createElement('div');
@@ -314,7 +305,7 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
     const sample = document.createElement('canvas');
     sample.width = sample.height = 24;
     const pixels = sample.getContext('2d', {willReadFrequently:true});
-    let receivedFrame = false, cameraReady = false, reportedBlack = false, sessionStarted = false;
+    let receivedFrame = false, cameraReady = false, reportedBlack = false;
     let lastFrame = 0, previousStatus = '', lastVideoTime = -1;
     const inspectFrame = (output, now) => {
         if (output.readyState < 2 || !output.videoWidth || output.currentTime === lastVideoTime) return;
@@ -355,16 +346,16 @@ final class RealtimeWebSession: NSObject, ObservableObject, WKNavigationDelegate
             localDisplay.classList.add('visible');
             tell('local');
         }
-        const state = start.parentElement?.parentElement?.querySelector('[role="status"]')?.textContent.trim();
+        const state = document.querySelector('[role="status"]')?.textContent.trim();
         if (state && state !== previousStatus) {
             previousStatus = state;
             tell('status:' + state);
         }
-        sessionStarted ||= !stop.disabled;
-        if ((sessionStarted && stop.disabled) ||
-            (receivedFrame && now - lastFrame > 6000) || now - began > 37000) {
+        const localEnded = cameraReady && !localDisplay.srcObject?.getVideoTracks().some(track => track.readyState === 'live');
+        if (localEnded || (receivedFrame && now - lastFrame > 6000) || now - began > 37000) {
             clearInterval(watchdog);
-            if (!stop.disabled) stop.click();
+            const stop = stopButton();
+            if (stop && !stop.disabled) stop.click();
             tell('ended');
         }
     }, 150);

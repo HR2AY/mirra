@@ -35,20 +35,28 @@ private struct ServicePreview: NSViewRepresentable {
     func updateNSView(_ view: WKWebView, context: Context) {}
 }
 
-private enum PreviewLayout {
-    static let width: CGFloat = 544
-    static let aspect: CGFloat = 4.0 / 3.0
+enum PreviewLayout {
+    static let width: CGFloat = 408
+    static let aspect: CGFloat = 9.0 / 16.0
     static let inset: CGFloat = 12
+    static let cameraScale: CGFloat = 0.58
 
-    static let cameraScale: CGFloat = 0.42
+    static func primaryWidth(in size: CGSize, showOutput: Bool) -> CGFloat {
+        let scale = showOutput ? 1 + cameraScale : 1
+        let spacing = showOutput ? 3 * inset : 2 * inset
+        return max(0, min(width, (size.width - spacing) / scale, (size.height - 2 * inset) * aspect))
+    }
+
+    static func contentWidth(primary: CGFloat, showOutput: Bool) -> CGFloat {
+        showOutput ? primary * (1 + cameraScale) + inset : primary
+    }
 
     static func windowSize(showOutput: Bool, on screen: NSScreen?) -> NSSize {
-        let stackScale = showOutput ? 1 + cameraScale : 1
-        let margins = (showOutput ? 3 : 2) * inset
         let bounds = screen?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
-        let tileWidth = floor(min(width, bounds.width - 4 * inset,
-                                  (bounds.height - margins - 2 * inset) * aspect / stackScale))
-        return NSSize(width: tileWidth + 2 * inset, height: tileWidth / aspect * stackScale + margins)
+        let available = CGSize(width: bounds.width - 4 * inset, height: bounds.height - 4 * inset)
+        let tileWidth = floor(primaryWidth(in: available, showOutput: showOutput))
+        return NSSize(width: contentWidth(primary: tileWidth, showOutput: showOutput) + 2 * inset,
+                      height: tileWidth / aspect + 2 * inset)
     }
 }
 
@@ -67,23 +75,26 @@ private struct UploadView: View {
     var body: some View {
         GeometryReader { geometry in
             let hasVideo = service.hasVideo
-            let stackScale = hasVideo ? 1 + PreviewLayout.cameraScale : 1
-            let margins = (hasVideo ? 3 : 2) * PreviewLayout.inset
-            let width = min(PreviewLayout.width,
-                            max(0, geometry.size.width - 2 * PreviewLayout.inset),
-                            max(0, geometry.size.height - margins) * PreviewLayout.aspect / stackScale)
+            let width = PreviewLayout.primaryWidth(in: geometry.size, showOutput: hasVideo)
             let height = width / PreviewLayout.aspect
             ZStack {
                 ServicePreview(webView: service.view)
-                    .frame(width: width, height: height * stackScale + (hasVideo ? PreviewLayout.inset : 0))
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-                VStack(spacing: PreviewLayout.inset) {
-                    if hasVideo {
-                        tile("Try On", width: width) { Color.clear }
-                        camera(width: width * PreviewLayout.cameraScale)
-                    } else {
-                        camera(width: width)
+                    .frame(width: PreviewLayout.contentWidth(primary: width, showOutput: hasVideo), height: height)
+                    .allowsHitTesting(service.needsLogin)
+                    .accessibilityHidden(!service.needsLogin)
+                if service.needsLogin {
+                    Button("Cancel") { service.cancelLogin() }
+                        .buttonStyle(.glass)
+                        .padding(10)
+                        .frame(maxWidth: width, maxHeight: height, alignment: .topTrailing)
+                } else {
+                    HStack(alignment: .top, spacing: PreviewLayout.inset) {
+                        if hasVideo {
+                            tile("Try On", width: width) { Color.clear }
+                            camera(width: width * PreviewLayout.cameraScale)
+                        } else {
+                            camera(width: width)
+                        }
                     }
                 }
             }
