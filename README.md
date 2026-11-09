@@ -1,3 +1,11 @@
+<p align="center">
+  <img src="assets/mirra-logo.png" alt="Mirra logo" width="480">
+</p>
+
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
 # Mirra
 
 Mirra is a native macOS floating camera window for live virtual try-on. The app appears as **Try On** in Finder. When the service returns a usable frame, the large preview shows the try-on result and the smaller preview below shows the live camera.
