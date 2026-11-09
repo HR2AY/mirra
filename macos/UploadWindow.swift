@@ -53,6 +53,9 @@ private enum PreviewLayout {
 }
 
 private struct UploadView: View {
+    private static let logo = Bundle.main.url(forResource: "mirra-logo", withExtension: "png")
+        .flatMap { NSImage(contentsOf: $0) }
+
     @State private var selectedFile: URL?
     @ObservedObject var service: RealtimeWebSession
     let session: AVCaptureSession
@@ -85,6 +88,17 @@ private struct UploadView: View {
                 }
             }
             .clipShape(.rect(cornerRadius: 15))
+            .overlay(alignment: .bottomTrailing) {
+                if hasVideo, let logo = Self.logo {
+                    Image(nsImage: logo)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: min(112, width * 0.21))
+                        .padding(10)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
             .padding(PreviewLayout.inset)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

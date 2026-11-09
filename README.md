@@ -16,8 +16,9 @@ Requires macOS 26 or later and an Xcode toolchain with the macOS 26 SDK or later
 
 ```sh
 app="build/Try On.app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp macos/Info.plist "$app/Contents/Info.plist"
+cp assets/mirra-logo.png "$app/Contents/Resources/"
 xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macosx26.0" \
   macos/*.swift -o "$app/Contents/MacOS/TryOn"
 codesign --force --sign - "$app"
